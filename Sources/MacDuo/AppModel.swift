@@ -2,6 +2,27 @@ import AppKit
 import Combine
 
 @MainActor
+protocol LidAngleProviding: AnyObject {
+    var onAngle: ((Double) -> Void)? { get set }
+    var onStatus: ((LidAngleSensor.Status) -> Void)? { get set }
+    func start()
+    func stop()
+}
+
+extension LidAngleSensor: LidAngleProviding {}
+
+@MainActor
+protocol DesktopEffectProviding: AnyObject {
+    var onFailure: ((String) -> Void)? { get set }
+    var onFirstFrame: (() -> Void)? { get set }
+    func prepare() async throws
+    func discard()
+    func setEffect(progress: Double, maxBlur: Double, glass: Double, projection: FoldProjection.Configuration?)
+}
+
+extension DesktopEffectController: DesktopEffectProviding {}
+
+@MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var angle: Double?
     @Published private(set) var sensorAvailable = false
@@ -10,31 +31,34 @@ final class AppModel: ObservableObject {
     @Published private(set) var isStarting = false
     @Published private(set) var hasSnapshot = false
     @Published private(set) var snapshotCount = 0
-    @Published private(set) var permissionNeeded = false
+    @Published private var permissionRecovery = ScreenCapturePermissionRecovery() {
+        didSet { defaults.set(permissionRecovery.requiresExplicitRetry, forKey: "screenAccessRequiresRetry") }
+    }
+    var permissionNeeded: Bool { permissionRecovery.requiresExplicitRetry }
     @Published private(set) var message: String?
     @Published var previewAngle = 65.0
     @Published var previewFollowsLid = false
     @Published var previewShowsObserver = true
     @Published var startAngle: Double {
         didSet {
-            UserDefaults.standard.set(startAngle, forKey: "startAngle")
+            defaults.set(startAngle, forKey: "startAngle")
             invalidateSnapshot()
             seedGateWithCurrentAngle()
         }
     }
     @Published var strength: Double {
-        didSet { UserDefaults.standard.set(strength, forKey: "strength"); updateEffect() }
+        didSet { defaults.set(strength, forKey: "strength"); updateEffect() }
     }
     @Published var eyeHeight: Double {
-        didSet { UserDefaults.standard.set(eyeHeight, forKey: "eyeHeight"); updateEffect() }
+        didSet { defaults.set(eyeHeight, forKey: "eyeHeight"); updateEffect() }
     }
     @Published var eyeDistance: Double {
-        didSet { UserDefaults.standard.set(eyeDistance, forKey: "eyeDistance"); updateEffect() }
+        didSet { defaults.set(eyeDistance, forKey: "eyeDistance"); updateEffect() }
     }
 
     private enum SnapshotPurpose { case fold, permissionTest }
-    private let sensor = LidAngleSensor()
-    private let desktop = DesktopEffectController()
+    private let sensor: any LidAngleProviding
+    private let desktop: any DesktopEffectProviding
     private var gate = FoldSessionGate()
     private var foldSessionActive = false
     private var snapshotPurpose: SnapshotPurpose?
@@ -46,7 +70,7 @@ final class AppModel: ObservableObject {
     // previous native screenshot, even if that API does not cancel immediately.
     private var snapshotTask: Task<Void, Never>?
     private var preparation: Task<Void, Error>?
-    private var permissionRecovery = ScreenCapturePermissionRecovery()
+    private let defaults: UserDefaults
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
@@ -55,8 +79,18 @@ final class AppModel: ObservableObject {
     private var suspended: Bool { suspensions.isSuspended }
     private var isShuttingDown = false
 
-    init() {
-        let defaults = UserDefaults.standard
+    convenience init(defaults: UserDefaults = .standard) {
+        self.init(defaults: defaults, sensor: LidAngleSensor(), desktop: DesktopEffectController())
+    }
+
+    init(defaults: UserDefaults, sensor: any LidAngleProviding, desktop: any DesktopEffectProviding) {
+        self.defaults = defaults
+        self.sensor = sensor
+        self.desktop = desktop
+        permissionRecovery = ScreenCapturePermissionRecovery(
+            requiresExplicitRetry: defaults.bool(forKey: "screenAccessRequiresRetry")
+        )
+        isEnabled = defaults.bool(forKey: "effectEnabled")
         func setting(_ key: String, fallback: Double, range: ClosedRange<Double>) -> Double {
             guard defaults.object(forKey: key) != nil else { return fallback }
             let value = defaults.double(forKey: key)
@@ -66,6 +100,7 @@ final class AppModel: ObservableObject {
         strength = setting("strength", fallback: 0.8, range: 0...1.4)
         eyeHeight = setting("eyeHeight", fallback: 1.5, range: 0.4...3)
         eyeDistance = setting("eyeDistance", fallback: 3, range: 1.5...5)
+        if permissionNeeded { message = ScreenCapturePermission.deniedMessage }
 
         sensor.onAngle = { [weak self] value in self?.receiveAngle(value) }
         sensor.onStatus = { [weak self] status in
@@ -86,8 +121,6 @@ final class AppModel: ObservableObject {
                   !self.suspended, !self.isShuttingDown else { return }
             self.gate.captureFailed()
             self.invalidateSnapshot(resetGate: false)
-            self.permissionRecovery.cancel()
-            self.permissionNeeded = false
             self.message = reason
         }
         desktop.onFirstFrame = { [weak self] in
@@ -124,7 +157,7 @@ final class AppModel: ObservableObject {
     func setEnabled(_ enabled: Bool) {
         guard !isShuttingDown, enabled != isEnabled else { return }
         isEnabled = enabled
-        permissionRecovery.cancel()
+        defaults.set(enabled, forKey: "effectEnabled")
         invalidateSnapshot()
         if enabled {
             seedGateWithCurrentAngle()
@@ -136,6 +169,7 @@ final class AppModel: ObservableObject {
     func testSingleSnapshot() {
         guard !isShuttingDown, !suspended, !isStarting else { return }
         isEnabled = true
+        defaults.set(true, forKey: "effectEnabled")
         invalidateSnapshot()
         seedGateWithCurrentAngle()
         beginSnapshot(.permissionTest)
@@ -147,8 +181,8 @@ final class AppModel: ObservableObject {
         guard !suspended, !isShuttingDown else { return }
         angle = value
         if smoothedAngle == nil { smoothedAngle = value }
-        retryAfterSettingsIfPossible()
-        guard isEnabled, sensorAvailable, snapshotPurpose != .permissionTest else { return }
+        guard isEnabled, sensorAvailable, snapshotPurpose != .permissionTest,
+              permissionRecovery.allowsAutomaticCapture else { return }
         switch gate.update(angle: value, startAngle: startAngle) {
         case .none:
             break
@@ -161,19 +195,25 @@ final class AppModel: ObservableObject {
     }
 
     private func beginSnapshot(_ purpose: SnapshotPurpose) {
-        guard isEnabled, !isShuttingDown, !suspended, !isStarting else { return }
+        guard isEnabled, !isShuttingDown, !suspended, !isStarting,
+              purpose == .permissionTest || permissionRecovery.allowsAutomaticCapture else { return }
         generation += 1
         let request = generation
         snapshotPurpose = purpose
         isStarting = true
         hasSnapshot = false
-        permissionRecovery.requestActivation()
         message = permissionNeeded ? "Checking snapshot access…" : nil
         let previous = snapshotTask
         snapshotTask = Task { @MainActor [weak self] in
             await previous?.value
             guard let self, !Task.isCancelled, request == self.generation,
                   self.isEnabled, !self.suspended, !self.isShuttingDown else { return }
+            // An older native request may report a denial while this fold is
+            // queued. Recheck after it finishes, before asking macOS again.
+            guard purpose == .permissionTest || self.permissionRecovery.allowsAutomaticCapture else {
+                self.invalidateSnapshot()
+                return
+            }
             self.activeGeneration = request
             let preparation = Task { @MainActor in try await self.desktop.prepare() }
             self.preparation = preparation
@@ -181,8 +221,7 @@ final class AppModel: ObservableObject {
                 try await preparation.value
                 guard request == self.generation, !Task.isCancelled else { return }
                 self.preparation = nil
-                self.permissionRecovery.captureStarted()
-                self.permissionNeeded = false
+                self.permissionRecovery.captureSucceeded()
                 self.isStarting = false
                 if purpose == .permissionTest {
                     // The diagnostic image is never displayed or retained.
@@ -194,21 +233,20 @@ final class AppModel: ObservableObject {
                     self.updateEffect()
                 }
             } catch {
+                // A genuine permission denial outlives the fold that asked for
+                // it. Reopening the lid can cancel the task while macOS still
+                // has a permission dialog open; retain that denial nonetheless.
+                let denied = ScreenCapturePermission.isDenied(error)
+                if denied {
+                    self.permissionRecovery.captureDenied()
+                    self.message = ScreenCapturePermission.deniedMessage
+                }
                 guard request == self.generation else { return }
                 self.gate.captureFailed()
                 self.invalidateSnapshot(resetGate: false)
-                self.permissionNeeded = ScreenCapturePermission.isDenied(error)
-                if self.permissionNeeded {
-                    self.permissionRecovery.captureDenied()
-                    self.message = ScreenCapturePermission.deniedMessage
-                    if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.systempreferences" {
-                        self.permissionRecovery.settingsBecameActive()
-                    }
-                } else {
-                    self.permissionRecovery.cancel()
+                if !denied {
                     self.message = error.localizedDescription
                 }
-                self.retryAfterSettingsIfPossible()
             }
         }
     }
@@ -218,19 +256,13 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    private func retryAfterSettingsIfPossible() {
-        guard NSApp.isActive, !isShuttingDown, !suspended, permissionNeeded, !isStarting,
-              permissionRecovery.consumeRetryOnReturn() else { return }
-        testSingleSnapshot()
-    }
-
     func useCurrentAngle() {
         guard let angle else { return }
         startAngle = min(125, max(70, angle))
     }
 
     private func seedGateWithCurrentAngle() {
-        if isEnabled, !suspended, sensorAvailable, let angle {
+        if isEnabled, !suspended, sensorAvailable, permissionRecovery.allowsAutomaticCapture, let angle {
             _ = gate.update(angle: angle, startAngle: startAngle)
         }
     }
@@ -296,7 +328,6 @@ final class AppModel: ObservableObject {
         guard !isShuttingDown else { return }
         isShuttingDown = true
         isEnabled = false
-        permissionRecovery.cancel()
         timer?.invalidate()
         timer = nil
         sensor.stop()
@@ -311,16 +342,6 @@ final class AppModel: ObservableObject {
 
     private func installObservers() {
         let workspace = NSWorkspace.shared.notificationCenter
-        workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
-            MainActor.assumeIsolated {
-                guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                      application.bundleIdentifier == "com.apple.systempreferences" else { return }
-                self?.permissionRecovery.settingsBecameActive()
-            }
-        })
-        observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.retryAfterSettingsIfPossible() }
-        })
         let workspaceEvents: [(Notification.Name, Notification.Name, CaptureSuspensions.Reason)] = [
             (NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification, .systemSleep),
             (NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification, .displaySleep),

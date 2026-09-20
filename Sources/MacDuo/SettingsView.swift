@@ -4,6 +4,7 @@ private let muted = Color.secondary
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var loginItem: LoginItemManager
     @State private var showsCalibration = false
     @State private var showsScreenAccess = false
 
@@ -183,6 +184,7 @@ struct SettingsView: View {
     private var details: some View {
         VStack(alignment: .leading, spacing: 12) {
             Divider()
+            launchAtLogin
             DisclosureGroup("Calibration", isExpanded: $showsCalibration) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Keep your head still. Adjust the viewpoint until the image stays in place.")
@@ -214,6 +216,33 @@ struct SettingsView: View {
             }
         }
         .font(.system(size: 11, weight: .medium))
+    }
+
+    private var launchAtLogin: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Toggle("Launch at login", isOn: Binding(
+                get: { loginItem.isEnabled },
+                set: { loginItem.setEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .disabled(!loginItem.isApplicationBundle || loginItem.requiresApproval)
+            .help("Start quietly in the menu bar when you log in")
+
+            if let message = loginItem.statusMessage {
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if loginItem.requiresApproval {
+                HStack(spacing: 10) {
+                    Button("Open Login Items") { loginItem.openSystemSettings() }
+                    Button("Remove login item") { loginItem.setEnabled(false) }
+                }
+                .controlSize(.small)
+            }
+        }
     }
 
     private var screenAccess: some View {

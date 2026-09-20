@@ -19,6 +19,8 @@ enum MacDuoApp {
 
     @MainActor private static func runDiagnostics() {
         print("MacDuo – local diagnostics")
+        print("App: \(Bundle.main.bundleURL.path)")
+        print("Version: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development")")
         print("macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)")
         print("CoreGraphics preflight (advisory): \(CGPreflightScreenCaptureAccess() ? "passed" : "failed")")
         print("Enabling the effect does not capture the screen. Snapshot access can be tested separately.")
@@ -48,6 +50,7 @@ enum MacDuoApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var model: AppModel!
+    private let loginItem = LoginItemManager()
     private var statusItem: NSStatusItem!
     private var window: NSWindow?
     private var toggleItem: NSMenuItem!
@@ -57,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var eventHandler: EventHandlerRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let showsSettings = LaunchPresentation.shouldShowSettings(
+            arguments: CommandLine.arguments,
+            event: NSAppleEventManager.shared().currentAppleEvent
+        )
         model = AppModel()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let image = NSImage(systemSymbolName: "laptopcomputer", accessibilityDescription: "MacDuo") {
@@ -85,7 +92,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.async { self?.updateMenu() }
         }
         installHotKey()
-        if !CommandLine.arguments.contains("--background") { showSettings() }
+        if showsSettings { showSettings() }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        loginItem.refresh()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -104,8 +115,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) { updateMenu() }
 
     @objc private func showSettings() {
+        loginItem.refresh()
         if window == nil {
-            let controller = NSHostingController(rootView: SettingsView(model: model))
+            let controller = NSHostingController(rootView: SettingsView(model: model, loginItem: loginItem))
             let newWindow = NSWindow(contentViewController: controller)
             newWindow.title = "MacDuo"
             newWindow.titlebarAppearsTransparent = true

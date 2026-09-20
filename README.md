@@ -19,10 +19,13 @@ MacDuo takes one screenshot at the start of a fold and adjusts its perspective u
 git clone https://github.com/lulkebit/macduo.git
 cd macduo
 ./scripts/build-app.sh
-open dist/MacDuo.app
+ditto dist/MacDuo.app /Applications/MacDuo.app
+open /Applications/MacDuo.app
 ```
 
-The script creates a release build and signs the app locally. There are no external package dependencies.
+The script creates a release build and signs it with a persistent local development identity in your default keychain. Its private key stays in Keychain. Future builds reuse the same identity so their code-signing requirement remains stable. There are no external package dependencies.
+
+Quit MacDuo before replacing an installed copy. Use the same installed app for screen recording permission and launch at login. If you cannot write to `/Applications`, use `~/Applications` instead.
 
 ## Use
 
@@ -30,6 +33,8 @@ The script creates a release build and signs the app locally. There are no exter
 2. Turn on **Effect**. Enabling it only arms the effect; it does not capture your screen.
 3. Lower the lid at least 2° below the open angle. Once sufficient movement is detected, MacDuo captures one image and projects it throughout the fold.
 4. Open the lid back to the configured angle to return to your live desktop and discard the image.
+
+Enable **Launch at login** to start MacDuo quietly in the menu bar when you sign in. The app restores your last **Effect** setting; startup itself never takes a screenshot. Login-item status follows System Settings, including changes made there.
 
 Closing the settings window leaves MacDuo in the menu bar. Press **⌃⌥⌘D** (Control–Option–Command–D) to toggle the effect from any app. The overlay passes clicks through; apps continue running underneath the frozen image.
 
@@ -41,9 +46,9 @@ Use **Calibration** to adjust eye height and distance. Keep your head still and 
 
 Screen images stay in memory. MacDuo does not save them, transmit them, capture audio, or use a recording stream. A fold reuses the same image even when movement stops or reverses. Pausing, locking, sleeping, losing the sensor, or changing displays discards it.
 
-macOS requires screen recording permission even for a single screenshot and controls any capture indicators. Use **Screen access → Test capture** to take and immediately discard a test image. This also arms the effect. If access is denied, select **Open Settings**, allow MacDuo, and return to the app. After a denied request, returning from System Settings triggers one test capture; **Retry access** also performs a test.
+macOS requires screen recording permission even for a single screenshot and controls any capture indicators. Use **Screen access → Test capture** to take and immediately discard a test image. This also arms the effect. If access is denied, select **Open Settings**, allow MacDuo, and return to the app. After a denied request, automatic captures stay blocked, including across restarts, until **Retry access** succeeds. Returning from System Settings or moving the lid does not trigger another permission request.
 
-Local ad hoc builds can need permission again after code changes. If access remains denied, remove the old MacDuo entry in System Settings and add the newly built app. Finish rebuilding before granting permission.
+When upgrading from an older ad hoc build, macOS may retain an allowed entry for the old code signature. Quit MacDuo, remove that old entry from Screen Recording in System Settings, and add the newly installed MacDuo.app. Then reopen it and choose **Retry access**. This refresh is needed when the signing identity changes; the new default build process reuses its identity. MacDuo never changes macOS privacy permissions itself.
 
 ## Limitations
 
@@ -65,7 +70,7 @@ open dist/MacDuo.app --args --background
 
 `--diagnose` briefly reads the sensor without taking a screenshot. `--background` launches with the settings window hidden. Tests cover capture gating, permission recovery, suspension handling, image boundaries, and perspective geometry against independent ray/plane calculations.
 
-Set `MACDUO_SIGNING_IDENTITY` when running the build script to use an existing signing identity instead of ad hoc signing.
+Set `MACDUO_SIGNING_IDENTITY` when running the build script to use an existing Apple signing identity. The default self-signed certificate is for local development; public binary distribution still requires Developer ID signing and notarization. Explicitly setting `MACDUO_SIGNING_IDENTITY=-` opts into ad hoc signing, which does not retain a stable identity across changed builds. See Apple’s [code-signing requirements](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
 
 See [projection design and API references](docs/reference.md) and [sensor notes](docs/sensor-notes.md). For hardware reports, include the Mac model, macOS version, and diagnostic output. Contributions and focused bug reports are welcome.
 

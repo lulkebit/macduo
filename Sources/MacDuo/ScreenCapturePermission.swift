@@ -2,7 +2,7 @@ import Foundation
 import ScreenCaptureKit
 
 enum ScreenCapturePermission {
-    static let deniedMessage = "Allow MacDuo in System Settings → Privacy & Security → Screen Recording, then return and test access again."
+    static let deniedMessage = "macOS could not use the screen recording permission. If MacDuo is already allowed, quit it, remove its old entry in System Settings, then add the current app from Applications. Reopen MacDuo and choose Retry access."
 
     /// A failed permission preflight is not authoritative for ScreenCaptureKit.
     /// Only its actual user-declined error means that access was denied.
@@ -22,43 +22,23 @@ enum ScreenCapturePermission {
     }
 }
 
-/// One retry per Settings visit, after an explicit activation and real denial.
-/// Dismissing a permission dialog or repeatedly activating the app cannot loop.
+/// A real denial blocks all sensor-triggered requests, independently of the
+/// fold gate. Pausing, waking, reopening the lid and visiting Settings must not
+/// dismiss the block. Only a successful explicit capture clears it.
 struct ScreenCapturePermissionRecovery {
-    private var userRequestedActivation = false
-    private var awaitingPermission = false
-    private var visitedSettings = false
+    private(set) var requiresExplicitRetry: Bool
 
-    mutating func requestActivation() {
-        userRequestedActivation = true
-        awaitingPermission = false
-        visitedSettings = false
+    init(requiresExplicitRetry: Bool = false) {
+        self.requiresExplicitRetry = requiresExplicitRetry
     }
 
-    mutating func captureStarted() {
-        awaitingPermission = false
-        visitedSettings = false
+    var allowsAutomaticCapture: Bool { !requiresExplicitRetry }
+
+    mutating func captureSucceeded() {
+        requiresExplicitRetry = false
     }
 
     mutating func captureDenied() {
-        awaitingPermission = userRequestedActivation
-    }
-
-    mutating func cancel() {
-        userRequestedActivation = false
-        awaitingPermission = false
-        visitedSettings = false
-    }
-
-    mutating func settingsBecameActive() {
-        // Apple's permission dialog may activate Settings before delivering
-        // the denial. Remember that visit, but still require a real denial.
-        if userRequestedActivation { visitedSettings = true }
-    }
-
-    mutating func consumeRetryOnReturn() -> Bool {
-        guard userRequestedActivation, awaitingPermission, visitedSettings else { return false }
-        visitedSettings = false
-        return true
+        requiresExplicitRetry = true
     }
 }
